@@ -68,13 +68,21 @@
 
 import argparse
 from jsonrpclib import Server
-import signal
 import sys
 import syslog
 
 # Set to allow unverified cert for eAPI call
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
+
+# Setup timeout function and signal
+import signal
+def handler(signum, frame):
+    syslog.syslog("%%ConfigCopy-6-LOG: Timed out waiting for destination eAPI.")
+    raise Exception("timeout")
+
+signal.signal(signal.SIGALRM, handler)
+signal.alarm(5)
 
 # ----------------------------------------------------------------
 # Configuration section for Remote Location
@@ -83,54 +91,72 @@ username = 'admin'
 password = 'arista'
 # ----------------------------------------------------------------
 
-# Pull in arguments to configure script logic
-parser = argparse.ArgumentParser(description='Save config to external location')
-required_arg = parser.add_argument_group('Required Arguments')
-required_arg.add_argument('-d', '--destination', dest='destination', required=True,
-                          help='IP of Location to Copy to', type=str)
-required_arg.add_argument('-t', '--type', dest='type', required=True,
-                          help='Server or Switch', type=str)
-args = parser.parse_args()
-dest_ip = args.destination
-dest_type = args.type
+def arg_it_up():
+    """ Pulls in Args
+        Returns:
+            dest_ip (string): Destination IP for Copy
+            dest_type (string): Type of Destination (Switch or Server)
+    """
+    # Pull in arguments to configure script logic
+    parser = argparse.ArgumentParser(description='Save config to external location')
+    required_arg = parser.add_argument_group('Required Arguments')
+    required_arg.add_argument('-d', '--destination', dest='destination', required=True,
+                              help='IP of Location to Copy to', type=str)
+    required_arg.add_argument('-t', '--type', dest='type', required=True,
+                              help='server or switch', type=str)
+    args = parser.parse_args()
+    dest_ip = args.destination
+    dest_type = args.type
+    return dest_ip, dest_type
 
-# Define URL for local eAPI connection. Uses Unix Socket
-local_switch = Server("unix:/var/run/command-api.sock")
-
-# Open syslog for log creation
-syslog.openlog('OnBoxConfigCopy', 0, syslog.LOG_LOCAL4)
-
-# Setup timeout function and signal
-def handler(signum, frame):
-    syslog.syslog("%%ConfigCopy-6-LOG: Timed out waiting for destination eAPI.")
-    raise Exception("timeout")
-
-signal.signal(signal.SIGALRM, handler)
-signal.alarm(5)
-
-def get_startup_config():
+def get_startup_config(switch):
     """ Copies startup-config as text via Unix Socket
+        Arg:
+            switch (instance): JSON-RPC instance for eAPI call to Switch
         Returns:
             startup_config (string): startup-config of local switch.
     """
     syslog.syslog("%%ConfigCopy-6-LOG: Copying startup-config...")
-    startup_config = local_switch.runCmds(1, ["enable", "show startup-config"], "text")[1]["output"]
+    startup_config = switch.runCmds(1, ["enable", "show startup-config"], "text")[1]["output"]
     return startup_config
 
-def dest_eapi_copy(config):
+def modify_config(config, switch):
+    """ Replaces Management IP and Hostname of Config for backup device
+        Args:
+            config (string): Unmodified startup config
+            switch (instance): JSON-RPC instance for eAPI call to Switch
+        Returns:
+            modified_config (string): Modified config
+    """
+    syslog.syslog("%%ConfigCopy-6-LOG: Destination is remote switch. Modifying config hostname and Ma1 IP...")
+    # Replace hostname with hostname-backup
+    hostname = switch.runCmds(1, ["show hostname"])[0]["output"]["hostname"]
+    temp_config_1 = config.replace("hostname " + hostname, "hostname " + hostname + "-backup")
+    # Replace Management1 IP with Destination Switch Management1 IP
+    ma1_ip_int = switch.runCmds(1, ["show interfaces Management1"])
+    ma1_ip = ma1_ip_int[0]["output"]["interfaces"]["Management1"]["interfaceAddresses"][0]["primaryIp"]["address"]
+    ma1_mask = str(ma1_ip_int[0]["output"]["interfaces"]["Management1"]["interfaceAddresses"][0]["primaryIp"]["maskLen"])
+    modified_config = temp_config_1.replace(ma1_ip + "/" + ma1_mask, dest_ip + "/" + ma1_mask)
+    return modified_config
+
+def dest_eapi_copy(ip, config):
     """ Sets up peer JSON-RPC instance based on Destination IP Arg
         and copies modified startup-config
         Args:
+            ip (string): Destination IP of Remote Switch
             config (string): Modified startup-config
         Returns:
-            switch_req (instance): JSON-RPC instance for eAPI call to Dest
+            config_response (list): Responses for each command
     """
     # Use Dest IP for peer switch eAPI connection
     syslog.syslog("%%ConfigCopy-6-LOG: Opening Peer eAPI Connection...")
     dest_url_string = "https://{}:{}@{}/command-api".format(username, password, dest_ip)
-    switch_req = Server(peer_url_string)
-
-    return switch_req
+    switch_req = Server(dest_url_string)
+    # Split config by line and apply
+    split_config = config.split("\n")
+    commands = ["enable", "configure"] + split_config
+    config_response = switch_req.runCmds(1, commands)
+    return config_response
 
 def dest_server_copy(config):
     """ Copies un-modified startup-config to external SCP Server
@@ -139,19 +165,32 @@ def dest_server_copy(config):
     """
     # Use Dest IP for SCP destination
 
-def modify_config(config):
-    """ Replaces Management IP and Hostname of Config for backup device
-        Args:
-            config (string): Unmodified startup config
-        Returns:
-            modified_config (string): Modified config
-    """
-    # Replace hostname with hostname-backup
-    hostname = local_switch.runCmds(1, ["show hostname"])[0]["output"]["hostname"]
-    temp_config_1 = config.replace("hostname " + hostname, "hostname " + hostname + "-backup")
-    # Replace Management1 IP with Destination Switch Management1 IP
-    ma1_ip_int = local_switch.runCmds(1, ["show interfaces Management1"])
-    ma1_ip = ma1_ip_int[0]["output"]["interfaces"]["Management1"]["interfaceAddresses"][0]["primaryIp"]["address"]
-    ma1_mask = str(ma1_ip_int[0]["output"]["interfaces"]["Management1"]["interfaceAddresses"][0]["primaryIp"]["maskLen"])
-    modified_config = temp_config_1.replace(ma1_ip + "/" + ma1_mask, dest_ip + "/" + ma1_mask)
-    return modified_config
+def main():
+    # Pull in CLI Arguments
+    cli_args = arg_it_up()
+    copy_ip = cli_args[0]
+    copy_type = cli_args[1]
+    # Open syslog for log creation
+    syslog.openlog('OnBoxConfigCopy', 0, syslog.LOG_LOCAL4)
+    # Define URL for local eAPI connection. Uses Unix Socket
+    local_switch = Server("unix:/var/run/command-api.sock")
+    # Pull in startup-config
+    main_start_config = get_startup_config(local_switch)
+    if copy_type == "switch":
+        backup_config = modify_config(main_start_config, local_switch)
+        response = dest_eapi_copy(copy_ip, backup_config)
+        for i in response:
+            if i.startswith("Invalid"):
+                syslog.syslog("%%ConfigCopy-6-LOG: Error copying command \"" + i + "\". Please validate syntax...")
+    elif copy_type == "server":
+        syslog.syslog("%%ConfigCopy-6-LOG: Invalid Destination Type. Valid options are 'switch'...")
+        syslog.syslog("%%ConfigCopy-6-LOG: Exiting script...")
+        sys.exit()
+    else:
+        # Only allows for two options for now.  Exit on all other options.
+        syslog.syslog("%%ConfigCopy-6-LOG: Invalid Destination Type. Valid options are 'server' or 'switch'...")
+        syslog.syslog("%%ConfigCopy-6-LOG: Exiting script...")
+        sys.exit()
+
+if __name__ == "__main__":
+    main()
