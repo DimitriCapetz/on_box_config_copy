@@ -52,10 +52,12 @@
       - The trigger action should be on the modification of startup-config.
       - The script uses passed arguments as indicated below.
       - Delay and threshold can be tweaked per environment needs.
+      - In this example, Ma1 is in a VRF.  If no VRF is used
+        'sudo ip netns exec ns-<ma1_vrf>' can be removed.
       
-           event-handler Downlink_Detect
-             trigger on-intf <downlink> operstatus
-             action bash python /mnt/flash/peer_interface_enabler.py -s <downlink> -v <vlan_list>
+           event-handler CONFIG-COPY
+             trigger on-startup-config
+             action bash python sudo ip netns exec ns-<ma1_vrf> python /mnt/flash/on_box_config_copy.py -d <dest_ip> -t <dest_type>
              delay 5
              timeout 30
 
