@@ -89,8 +89,8 @@ signal.alarm(5)
 # ----------------------------------------------------------------
 # Configuration section for Remote Location
 # ----------------------------------------------------------------
-username = 'admin'
-password = 'arista'
+username = "admin"
+password = "arista"
 # ----------------------------------------------------------------
 
 def arg_it_up():
@@ -100,12 +100,12 @@ def arg_it_up():
             dest_type (string): Type of Destination (Switch or Server)
     """
     # Pull in arguments to configure script logic
-    parser = argparse.ArgumentParser(description='Save config to external location')
-    required_arg = parser.add_argument_group('Required Arguments')
-    required_arg.add_argument('-d', '--destination', dest='destination', required=True,
-                              help='IP of Location to Copy to', type=str)
-    required_arg.add_argument('-t', '--type', dest='type', required=True,
-                              help='server or switch', type=str)
+    parser = argparse.ArgumentParser(description="Save config to external location")
+    required_arg = parser.add_argument_group("Required Arguments")
+    required_arg.add_argument("-d", "--destination", dest="destination", required=True,
+                              help="IP of Location to Copy to", type=str)
+    required_arg.add_argument("-t", "--type", dest="type", required=True,
+                              help="server or switch", type=str)
     args = parser.parse_args()
     dest_ip = args.destination
     dest_type = args.type
