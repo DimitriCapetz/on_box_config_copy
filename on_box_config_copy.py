@@ -118,9 +118,10 @@ def get_startup_config(switch):
     """
     syslog.syslog("%%ConfigCopy-6-LOG: Copying startup-config...")
     startup_config = switch.runCmds(1, ["enable", "show startup-config"], "text")[1]["output"]
+    startup_config = '\n'.join(startup_config.split('\n')[6:])
     return startup_config
 
-def modify_config(config, switch):
+def modify_config(config, ip, switch):
     """ Replaces Management IP and Hostname of Config for backup device
         Args:
             config (string): Unmodified startup config
@@ -130,13 +131,23 @@ def modify_config(config, switch):
     """
     syslog.syslog("%%ConfigCopy-6-LOG: Destination is remote switch. Modifying config hostname and Ma1 IP...")
     # Replace hostname with hostname-backup
-    hostname = switch.runCmds(1, ["show hostname"])[0]["output"]["hostname"]
-    temp_config_1 = config.replace("hostname " + hostname, "hostname " + hostname + "-backup")
+    hostname = switch.runCmds(1, ["show hostname"])[0]["hostname"]
+    temp_config = config.replace("hostname " + hostname, "hostname " + hostname + "-backup")
     # Replace Management1 IP with Destination Switch Management1 IP
     ma1_ip_int = switch.runCmds(1, ["show interfaces Management1"])
-    ma1_ip = ma1_ip_int[0]["output"]["interfaces"]["Management1"]["interfaceAddresses"][0]["primaryIp"]["address"]
-    ma1_mask = str(ma1_ip_int[0]["output"]["interfaces"]["Management1"]["interfaceAddresses"][0]["primaryIp"]["maskLen"])
-    modified_config = temp_config_1.replace(ma1_ip + "/" + ma1_mask, dest_ip + "/" + ma1_mask)
+    ma1_ip = ma1_ip_int[0]["interfaces"]["Management1"]["interfaceAddress"][0]["primaryIp"]["address"]
+    ma1_mask = str(ma1_ip_int[0]["interfaces"]["Management1"]["interfaceAddress"][0]["primaryIp"]["maskLen"])
+    temp_config = temp_config.replace(ma1_ip + "/" + ma1_mask, ip + "/" + ma1_mask)
+    # Remove Event-Handler Config to prevent some sort of infinite loop
+    temp_config_list = temp_config.split("!\n")
+    modified_config = ""
+    for config_section in temp_config_list:
+        if config_section.startswith("event-handler CONFIG-BACKUP"):
+            continue
+        elif config_section.startswith("end"):
+            continue
+        else:
+            modified_config += config_section
     return modified_config
 
 def dest_eapi_copy(ip, config):
@@ -149,12 +160,13 @@ def dest_eapi_copy(ip, config):
             config_response (list): Responses for each command
     """
     # Use Dest IP for peer switch eAPI connection
-    syslog.syslog("%%ConfigCopy-6-LOG: Opening Peer eAPI Connection...")
-    dest_url_string = "https://{}:{}@{}/command-api".format(username, password, dest_ip)
+    syslog.syslog("%%ConfigCopy-6-LOG: Opening Destination eAPI Connection...")
+    dest_url_string = "https://{}:{}@{}/command-api".format(username, password, ip)
     switch_req = Server(dest_url_string)
     # Split config by line and apply
     split_config = config.split("\n")
     commands = ["enable", "configure"] + split_config
+    syslog.syslog("%%ConfigCopy-6-LOG: Pushing Configuration to Destination Switch...")
     config_response = switch_req.runCmds(1, commands)
     return config_response
 
@@ -177,11 +189,9 @@ def main():
     # Pull in startup-config
     main_start_config = get_startup_config(local_switch)
     if copy_type == "switch":
-        backup_config = modify_config(main_start_config, local_switch)
-        response = dest_eapi_copy(copy_ip, backup_config)
-        for i in response:
-            if i.startswith("Invalid"):
-                syslog.syslog("%%ConfigCopy-6-LOG: Error copying command \"" + i + "\". Please validate syntax...")
+        backup_config = modify_config(main_start_config, copy_ip, local_switch)
+        dest_eapi_copy(copy_ip, backup_config)
+        syslog.syslog("%%ConfigCopy-6-LOG: Configuration Copy completed successfully...")
     elif copy_type == "server":
         syslog.syslog("%%ConfigCopy-6-LOG: Invalid Destination Type. Valid options are 'switch'...")
         syslog.syslog("%%ConfigCopy-6-LOG: Exiting script...")
